@@ -23,13 +23,18 @@ Troubleshooting:
 #include "esp32notifications.h"
 #include "esp_gap_ble_api.h"
 #include "knownApps.h"
+#include <Wire.h>
+#include <U8g2lib.h>
 
 // Pairing button to GND (GPIO33).
 static const int PAIRING_PIN = 33;
-static const char *DEVICE_NAME = "beepr-ancs";
+static const char *DEVICE_NAME = "BEEPR";
+static const uint32_t KEEPALIVE_MS = 20000;
+U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 
 BLENotifications notifications;
 static bool ancsReadyLogged = false;
+static uint32_t lastKeepAliveMs = 0;
 
 static void logAdvertisingStarted()
 {
@@ -124,6 +129,34 @@ static void printNotificationCommon(const ArduinoNotification *notification)
     Serial.printf("UUID: %lu\n", (unsigned long)notification->uuid);
 }
 
+static void oledShowStatus(const String &line1, const String &line2)
+{
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x12_tr);
+    oled.drawStr(2, 12, line1.c_str());
+    oled.drawStr(2, 28, line2.c_str());
+    oled.setDrawColor(0);
+    oled.drawBox(0, 0, 2, 64);
+    oled.setDrawColor(1);
+    oled.sendBuffer();
+}
+
+static void oledShowNotification(const String &appName, const String &contact, const String &message)
+{
+    oled.clearBuffer();
+    oled.setFont(u8g2_font_6x12_tr);
+    oled.drawStr(2, 12, appName.c_str());
+    oled.drawStr(2, 28, contact.c_str());
+    if (message.length())
+    {
+        oled.drawStr(2, 44, message.c_str());
+    }
+    oled.setDrawColor(0);
+    oled.drawBox(0, 0, 2, 64);
+    oled.setDrawColor(1);
+    oled.sendBuffer();
+}
+
 static void onNotificationArrived(const ArduinoNotification *notification, const Notification *rawNotificationData)
 {
     (void)rawNotificationData;
@@ -142,6 +175,11 @@ static void onNotificationArrived(const ArduinoNotification *notification, const
     }
 
     printNotificationCommon(notification);
+
+    String appName = notification->type.length() ? getAppName(notification->type) : String("(unknown)");
+    String contact = notification->title.length() ? notification->title : String("(none)");
+    String message = notification->message.length() ? notification->message : String("");
+    oledShowNotification(appName, contact, message);
 }
 
 static void onNotificationRemoved(const ArduinoNotification *notification, const Notification *rawNotificationData)
@@ -164,13 +202,19 @@ void setup()
     Serial.begin(115200);
     delay(200);
 
+    Wire.begin(21, 22);
+    oled.begin();
+    oledShowStatus("Beeper", "Starting...");
+
     if (pairingMode)
     {
         Serial.println("PAIRING MODE (GPIO33=LOW)");
+        oledShowStatus("PAIRING MODE", "GPIO33=LOW");
     }
     else
     {
         Serial.println("NORMAL MODE (GPIO33=HIGH)");
+        oledShowStatus("NORMAL MODE", "GPIO33=HIGH");
     }
 
     bool ok = notifications.begin(DEVICE_NAME);
@@ -203,5 +247,12 @@ void setup()
 
 void loop()
 {
+    // Keep the BLE link active without changing ANCS behavior.
+    uint32_t now = millis();
+    if (now - lastKeepAliveMs >= KEEPALIVE_MS)
+    {
+        notifications.keepAlive();
+        lastKeepAliveMs = now;
+    }
     delay(250);
 }
