@@ -93,6 +93,11 @@ static const AppNameEntry kAppNames[] = {
 
     // ===== BANKING & FINANCE =====
     {"com.paypal.PPClient", "PayPal"},
+    {"com.3mosquitos.MercadoLibre", "MercadoLibre"},
+    {"com.3mosquitos.mercadolibre", "MercadoLibre"},
+    {"com.mercadopago.MercadoPago", "MercadoPago"},
+    {"com.mercadopago.mercadopago", "MercadoPago"},
+    {"ar.com.santander.rio.mbanking", "Santander Rio"},
     {"com.squareup.cash", "Cash App"},
     {"com.coinbase.consumer", "Coinbase"},
     {"com.venmo", "Venmo"},
@@ -219,17 +224,49 @@ static const AppNameEntry kAppNames[] = {
     {"nextdoor.nextdoor", "Nextdoor"},
     {"com.offerup.offerup", "OfferUp"},
     {"com.craigslist.craigslistmobile", "Craigslist"},
+    {"com.openai.chat", "ChatGPT"},
     {"com.ring.ring", "Ring"},
     {"com.nestlabs.jasper", "Nest"},
     {"com.philips.hue", "Philips Hue"},
     {"com.duolingo.DuolingoMobile", "Duolingo"},
 };
 
+static inline String normalizeBundleId(String value)
+{
+    value.trim();
+    value.toLowerCase();
+
+    if (value.startsWith("\"") && value.endsWith("\"") && value.length() >= 2)
+    {
+        value = value.substring(1, value.length() - 1);
+        value.trim();
+    }
+    return value;
+}
+
+static inline bool bundleIdMatches(const String &normalizedIncoming, const char *knownBundleId)
+{
+    String normalizedKnown = normalizeBundleId(String(knownBundleId));
+    if (normalizedIncoming == normalizedKnown)
+    {
+        return true;
+    }
+
+    // Some ANCS payloads may include prefixes/suffixes around bundle id.
+    if (normalizedIncoming.endsWith(normalizedKnown))
+    {
+        return true;
+    }
+    return false;
+}
+
 static inline String getAppName(const String &bundleId)
 {
+    String normalizedIncoming = normalizeBundleId(bundleId);
+
     for (size_t i = 0; i < (sizeof(kAppNames) / sizeof(kAppNames[0])); ++i)
     {
-        if (bundleId == kAppNames[i].bundleId)
+        if (bundleIdMatches(normalizedIncoming, kAppNames[i].bundleId))
         {
             return kAppNames[i].appName;
         }

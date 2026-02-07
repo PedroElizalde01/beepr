@@ -25,15 +25,33 @@ void BeeprDisplay::showStatus(const String &line1, const String &line2)
     oled.sendBuffer();
 }
 
-void BeeprDisplay::showNotification(const String &appName, const String &contact, const String &message)
+void BeeprDisplay::showNotification(const String &appName, const String &contact, const String &message,
+                                    size_t currentIndex, size_t totalCount)
 {
     oled.clearBuffer();
     oled.setFont(u8g2_font_6x12_tr);
-    oled.drawStr(2, 12, appName.c_str());
-    oled.drawStr(2, 28, contact.c_str());
+    oled.drawStr(2, 26, appName.c_str());
+    oled.drawStr(2, 40, contact.c_str());
     if (message.length())
     {
-        oled.drawStr(2, 44, message.c_str());
+        oled.drawStr(2, 54, message.c_str());
+    }
+    if (totalCount > 0)
+    {
+        size_t shownIndex = currentIndex;
+        if (shownIndex >= totalCount)
+        {
+            shownIndex = totalCount - 1;
+        }
+        char counter[16];
+        snprintf(counter, sizeof(counter), "%u/%u",
+                 (unsigned)(shownIndex + 1), (unsigned)totalCount);
+        int16_t x = 128 - oled.getStrWidth(counter) - 2;
+        if (x < 2)
+        {
+            x = 2;
+        }
+        oled.drawStr(x, 12, counter);
     }
     oled.setDrawColor(0);
     oled.drawBox(0, 0, 2, 64);

@@ -1,89 +1,309 @@
 #include "beepr_notifs.h"
 #include "beepr_display.h"
+#include <vector>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 struct StoredNotification
 {
     String app;
     String contact;
     String message;
-    uint32_t uuid;
+    uint32_t uid;
 };
 
-static const size_t MAX_NOTIFS = 10;
-static StoredNotification notifBuf[MAX_NOTIFS];
-static size_t notifCount = 0;
-static size_t notifHead = 0;   // index of oldest
-static size_t currentIndex = 0; // offset from head
+static std::vector<StoredNotification> notifList;
+static size_t currentIndex = 0;
+static SemaphoreHandle_t notifMutex = nullptr;
+static SemaphoreHandle_t displayMutex = nullptr;
+static portMUX_TYPE mutexInitMux = portMUX_INITIALIZER_UNLOCKED;
 
-static void displayCurrent()
+struct DisplaySnapshot
 {
-    if (notifCount == 0)
+    bool hasNotification;
+    String app;
+    String contact;
+    String message;
+    size_t current;
+    size_t total;
+};
+
+static SemaphoreHandle_t getNotifMutex()
+{
+    if (notifMutex == nullptr)
     {
-        BeeprDisplay::showEmpty();
+        portENTER_CRITICAL(&mutexInitMux);
+        if (notifMutex == nullptr)
+        {
+            notifMutex = xSemaphoreCreateMutex();
+        }
+        portEXIT_CRITICAL(&mutexInitMux);
+    }
+    return notifMutex;
+}
+
+static SemaphoreHandle_t getDisplayMutex()
+{
+    if (displayMutex == nullptr)
+    {
+        portENTER_CRITICAL(&mutexInitMux);
+        if (displayMutex == nullptr)
+        {
+            displayMutex = xSemaphoreCreateMutex();
+        }
+        portEXIT_CRITICAL(&mutexInitMux);
+    }
+    return displayMutex;
+}
+
+static int findIndexByUidLocked(uint32_t uid)
+{
+    for (size_t i = 0; i < notifList.size(); ++i)
+    {
+        if (notifList[i].uid == uid)
+        {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static DisplaySnapshot buildSnapshotLocked()
+{
+    DisplaySnapshot snapshot = {false, "", "", "", 0, 0};
+    const size_t count = notifList.size();
+    if (count == 0)
+    {
+        currentIndex = 0;
+        return snapshot;
+    }
+    if (currentIndex >= count)
+    {
+        currentIndex = count - 1;
+    }
+    const StoredNotification &n = notifList[currentIndex];
+    snapshot.hasNotification = true;
+    snapshot.app = n.app;
+    snapshot.contact = n.contact;
+    snapshot.message = n.message;
+    snapshot.current = currentIndex;
+    snapshot.total = count;
+    return snapshot;
+}
+
+static void renderSnapshot(const DisplaySnapshot &snapshot)
+{
+    SemaphoreHandle_t d = getDisplayMutex();
+    if (!d || xSemaphoreTake(d, portMAX_DELAY) != pdTRUE)
+    {
         return;
     }
-    size_t idx = (notifHead + currentIndex) % MAX_NOTIFS;
-    BeeprDisplay::showNotification(notifBuf[idx].app, notifBuf[idx].contact, notifBuf[idx].message);
+
+    if (!snapshot.hasNotification)
+    {
+        BeeprDisplay::showEmpty();
+        xSemaphoreGive(d);
+        return;
+    }
+    BeeprDisplay::showNotification(snapshot.app, snapshot.contact, snapshot.message,
+                                   snapshot.current, snapshot.total);
+    xSemaphoreGive(d);
+}
+
+static bool removeAtLocked(size_t index, size_t *newCount, DisplaySnapshot *snapshotOut)
+{
+    const size_t count = notifList.size();
+    if (count == 0 || index >= count)
+    {
+        return false;
+    }
+
+    if (index < currentIndex)
+    {
+        currentIndex--;
+    }
+
+    notifList.erase(notifList.begin() + static_cast<std::vector<StoredNotification>::difference_type>(index));
+
+    if (newCount)
+    {
+        *newCount = notifList.size();
+    }
+    if (snapshotOut)
+    {
+        *snapshotOut = buildSnapshotLocked();
+    }
+    return true;
 }
 
 void BeeprNotifs::showCurrent()
 {
-    displayCurrent();
+    SemaphoreHandle_t m = getNotifMutex();
+    if (!m)
+    {
+        BeeprDisplay::showEmpty();
+        return;
+    }
+
+    if (xSemaphoreTake(m, portMAX_DELAY) != pdTRUE)
+    {
+        BeeprDisplay::showEmpty();
+        return;
+    }
+    DisplaySnapshot snapshot = buildSnapshotLocked();
+    xSemaphoreGive(m);
+    renderSnapshot(snapshot);
 }
 
 void BeeprNotifs::add(const String &app, const String &contact, const String &message, uint32_t uuid)
 {
-    size_t idx;
-    if (notifCount < MAX_NOTIFS)
+    SemaphoreHandle_t m = getNotifMutex();
+    if (!m)
     {
-        idx = (notifHead + notifCount) % MAX_NOTIFS;
-        notifCount++;
+        return;
+    }
+
+    if (xSemaphoreTake(m, portMAX_DELAY) != pdTRUE)
+    {
+        return;
+    }
+
+    int existingIndex = findIndexByUidLocked(uuid);
+    if (existingIndex >= 0)
+    {
+        StoredNotification &n = notifList[(size_t)existingIndex];
+        n.app = app;
+        n.contact = contact;
+        n.message = message;
+        currentIndex = (size_t)existingIndex;
     }
     else
     {
-        // Drop the oldest, append new at end.
-        notifHead = (notifHead + 1) % MAX_NOTIFS;
-        idx = (notifHead + notifCount - 1) % MAX_NOTIFS;
+        notifList.push_back({app, contact, message, uuid});
+        currentIndex = notifList.size() - 1;
     }
 
-    notifBuf[idx] = {app, contact, message, uuid};
-    currentIndex = notifCount - 1;
-    displayCurrent();
+    size_t count = notifList.size();
+    DisplaySnapshot snapshot = buildSnapshotLocked();
+    xSemaphoreGive(m);
+
+    Serial.printf("Local notifications: %u\n", (unsigned)count);
+    renderSnapshot(snapshot);
+}
+
+bool BeeprNotifs::removeAt(size_t index)
+{
+    SemaphoreHandle_t m = getNotifMutex();
+    if (!m)
+    {
+        return false;
+    }
+
+    if (xSemaphoreTake(m, portMAX_DELAY) != pdTRUE)
+    {
+        return false;
+    }
+
+    size_t newCount = 0;
+    DisplaySnapshot snapshot = {false, "", "", "", 0, 0};
+    bool removed = removeAtLocked(index, &newCount, &snapshot);
+    xSemaphoreGive(m);
+
+    if (!removed)
+    {
+        return false;
+    }
+
+    Serial.printf("Local notifications: %u\n", (unsigned)newCount);
+    renderSnapshot(snapshot);
+    return true;
 }
 
 void BeeprNotifs::removeCurrent()
 {
-    if (notifCount == 0)
+    // Remove the currently displayed notification.
+    if (removeAt(currentIndex))
     {
-        return;
+        Serial.println("Local notification removed");
+    }
+    else
+    {
+        Serial.println("Remove skipped (no notifications)");
+    }
+}
+
+int BeeprNotifs::findIndexByUid(uint32_t uid)
+{
+    SemaphoreHandle_t m = getNotifMutex();
+    if (!m)
+    {
+        return -1;
     }
 
-    // Shift items down to fill the removed slot.
-    for (size_t i = currentIndex; i + 1 < notifCount; ++i)
+    if (xSemaphoreTake(m, portMAX_DELAY) != pdTRUE)
     {
-        size_t fromIdx = (notifHead + i + 1) % MAX_NOTIFS;
-        size_t toIdx = (notifHead + i) % MAX_NOTIFS;
-        notifBuf[toIdx] = notifBuf[fromIdx];
+        return -1;
+    }
+    int idx = findIndexByUidLocked(uid);
+    xSemaphoreGive(m);
+    return idx;
+}
+
+bool BeeprNotifs::removeByUid(uint32_t uid)
+{
+    // Used by ANCS "Removed" events to keep local list in sync.
+    SemaphoreHandle_t m = getNotifMutex();
+    if (!m)
+    {
+        return false;
+    }
+    if (xSemaphoreTake(m, portMAX_DELAY) != pdTRUE)
+    {
+        return false;
     }
 
-    notifCount--;
-    if (notifCount == 0)
+    int idx = findIndexByUidLocked(uid);
+    if (idx < 0)
     {
-        currentIndex = 0;
+        xSemaphoreGive(m);
+        return false;
     }
-    else if (currentIndex >= notifCount)
+
+    size_t newCount = 0;
+    DisplaySnapshot snapshot = {false, "", "", "", 0, 0};
+    bool removed = removeAtLocked((size_t)idx, &newCount, &snapshot);
+    xSemaphoreGive(m);
+
+    if (!removed)
     {
-        currentIndex = 0;
+        return false;
     }
-    displayCurrent();
+
+    Serial.printf("Local notifications: %u\n", (unsigned)newCount);
+    renderSnapshot(snapshot);
+    return true;
 }
 
 void BeeprNotifs::next()
 {
-    if (notifCount == 0)
+    SemaphoreHandle_t m = getNotifMutex();
+    if (!m)
     {
         return;
     }
-    currentIndex = (currentIndex + 1) % notifCount;
-    displayCurrent();
+    if (xSemaphoreTake(m, portMAX_DELAY) != pdTRUE)
+    {
+        return;
+    }
+
+    const size_t count = notifList.size();
+    if (count == 0)
+    {
+        xSemaphoreGive(m);
+        return;
+    }
+    currentIndex = (currentIndex + 1) % count;
+    DisplaySnapshot snapshot = buildSnapshotLocked();
+    xSemaphoreGive(m);
+    renderSnapshot(snapshot);
 }
